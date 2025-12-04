@@ -21,46 +21,22 @@
 <body>
 <h2>جميع العطور</h2>
 
-<div class="progress-container" id="progressContainer"><div class="progress-bar" id="progressBar">0%</div></div>
+<div class="progress-container"><div class="progress-bar" id="progressBar">0%</div></div>
 <div id="viewer"></div>
 
 <script>
 let zipObj;
 
-/**
- * يعرض رسالة خطأ داخل صفحة العرض مع تفاصيل اختيارية
- * @param {string} userMsg - رسالة المستخدم القصيرة
- * @param {string} details - تفاصيل مفصّلة (اختياري)
- */
-function showError(userMsg, details) {
-    const viewer = document.getElementById("viewer");
-    viewer.innerHTML = '';
-    const p = document.createElement('p');
-    p.className = 'msg';
-    p.textContent = userMsg;
-    viewer.appendChild(p);
-
-    if (details) {
-        const pre = document.createElement('pre');
-        pre.textContent = details;
-        viewer.appendChild(pre);
-    }
-
-    // إظهار أيضاً في الـ console
-    console.error(userMsg, details || '');
-    // إخفاء شريط التقدم لاحقاً
+/* --- دالة عرض الخطأ الحقيقي --- */
+function showError(err) {
+    const viewer = document.getElementById('viewer');
+    viewer.innerHTML = `<p class="msg">حدث خطأ أثناء تحميل أو قراءة الملف:</p><pre>${err}</pre>`;
+    console.error(err);
     const pb = document.getElementById('progressBar');
-    if (pb) {
-        pb.style.width = '0%';
-        pb.textContent = 'خطأ';
-    }
+    if(pb) { pb.style.width='0%'; pb.textContent='خطأ'; }
 }
 
-/**
- * يحول chunks إلى Uint8Array واحد
- * @param {Uint8Array[]} chunks
- * @param {number} totalLength
- */
+/* --- دالة لتحويل chunks إلى Uint8Array --- */
 function concatChunks(chunks, totalLength) {
     const result = new Uint8Array(totalLength);
     let offset = 0;
@@ -71,124 +47,50 @@ function concatChunks(chunks, totalLength) {
     return result;
 }
 
-async function loadZipFromReleasesAsset() {
-    const assetApiUrl = "https://pub-64ea7c0b4e8d44fb86d9a76223463ea2.r2.dev/p.zip";
+/* --- دالة تحميل ZIP من رابط خارجي --- */
+async function loadZip() {
+    const url = "https://pub-64ea7c0b4e8d44fb86d9a76223463ea2.r2.dev/p.zip";
 
     try {
-        const response = await fetch(assetApiUrl, {
-            headers: {
-                "Accept": "application/octet-stream"
-            }
-        });
-
-        // لو الاستجابة مش OK نعرض رسالة واضحة تشمل رمز الحالة
+        const response = await fetch(url);
         if (!response.ok) {
             const text = await response.text().catch(()=>'');
-            const details = `HTTP ${response.status} ${response.statusText}\n\nResponse body (first 1000 chars):\n${text.slice(0,1000)}`;
-            showError('فشل في تحميل الملف: الاستجابة من GitHub لم تكن ناجحة.', details);
-            return;
+            throw new Error(`HTTP ${response.status} ${response.statusText}\n\nResponse body:\n${text.slice(0,1000)}`);
         }
 
-        // نتحقق من نوع المحتوى: إذا رجع HTML غالبًا فيه خطأ (مثلاً صفحة خطأ أو login)
-        const ct = response.headers.get('Content-Type') || '';
-        if (ct.includes('text/html')) {
-            const text = await response.text().catch(()=>null);
-            const details = `المحتوى المرسل هو HTML وليس ملف ZIP.\nContent-Type: ${ct}\n\nتجريب أول 2000 حرف من المحتوى:\n${text ? text.slice(0,2000) : '(لا يمكن قراءة النص)'}`;
-            showError('المحتوى المستلم ليس ملف ZIP. ربما GitHub أعاد صفحة خطأ أو طلب مصادقة.', details);
-            return;
+        const contentType = response.headers.get('Content-Type') || '';
+        if (contentType.includes('text/html')) {
+            const text = await response.text().catch(()=>'(لا يمكن قراءة المحتوى)');
+            throw new Error(`المحتوى المرسل ليس ZIP (Content-Type: ${contentType})\n\nأول 2000 حرف:\n${text.slice(0,2000)}`);
         }
 
-        // نحاول قراءة الطول الكلي إن توفر
-        const contentLengthHeader = response.headers.get('Content-Length');
-        const totalLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+        const arrayBuffer = await response.arrayBuffer();
 
-        // إذا body غير متوفر (بعض البيئات) نستخدم arrayBuffer مباشرة كبديل
-        if (!response.body || !response.body.getReader) {
-            // fallback بسيط
-            const buffer = await response.arrayBuffer();
-            try {
-                zipObj = await JSZip.loadAsync(buffer);
-                document.getElementById('progressBar').style.display = 'none';
-                renderRoot();
-                return;
-            } catch (err) {
-                showError('فشل قراءة ملف ZIP (fallback arrayBuffer).', String(err));
-                return;
-            }
-        }
-
-        // قراءة stream تدريجياً لعرض التقدم
-        const reader = response.body.getReader();
-        const chunks = [];
-        let received = 0;
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            if (value) {
-                chunks.push(value);
-                received += value.length;
-                // حساب نسبة إن كان الطول معروف
-                if (totalLength) {
-                    const percent = Math.min(100, Math.round((received / totalLength) * 100));
-                    const pb = document.getElementById('progressBar');
-                    pb.style.width = percent + '%';
-                    pb.textContent = percent + '%';
-                } else {
-                    // عرض تقدم تقريبي عند عدم توفر طول
-                    const pb = document.getElementById('progressBar');
-                    // نستخدم مؤشر بسيط متدرج
-                    const approx = Math.min(99, Math.round((Math.log(received+1) / Math.log(1024*1024)) * 10) * 10);
-                    pb.style.width = approx + '%';
-                    pb.textContent = approx + '%';
-                }
-            }
-        }
-
-        // نجمع البايتس
-        const all = concatChunks(chunks, received);
-
-        // نحاول تحميل zip
         try {
-            zipObj = await JSZip.loadAsync(all);
+            zipObj = await JSZip.loadAsync(arrayBuffer);
         } catch (err) {
-            // إذا فشل JSZip، نعرض رسالة مفصّلة ونحاول الكشف عن محتويات خاطئة
-            // نعرض أول بضعة بايتس كـ hex للتتبّع
-            const head = all.slice(0, 64);
-            const hex = Array.from(head).map(b => b.toString(16).padStart(2, '0')).join(' ');
-            showError('JSZip فشل في فتح الملف — ربما الملف تالف أو ليس ZIP.', `خطأ JSZip: ${err}\n\nأول 64 بايت (hex):\n${hex}`);
-            return;
+            const head = new Uint8Array(arrayBuffer.slice(0,64));
+            const hex = Array.from(head).map(b=>b.toString(16).padStart(2,'0')).join(' ');
+            throw new Error(`فشل JSZip في قراءة الملف: ${err}\n\nأول 64 بايت (hex):\n${hex}`);
         }
 
-        // إخفاء شريط التقدّم وإظهار المحتوى
-        document.getElementById('progressBar').style.display = 'none';
+        document.getElementById('progressBar').style.display='none';
         renderRoot();
 
-    } catch (e) {
-        // خطأ عام مثل network failure أو CORS
-        let details = String(e);
-        // لو الخطأ متعلق بـ CORS غالبًا الرسالة هي TypeError: Failed to fetch أو مشابه
-        if (details.includes('Failed to fetch') || details.includes('NetworkError')) {
-            details += '\n\nملاحظة: قد يكون السبب سياسات CORS أو رفض وصول من المتصفح (GitHub API يحتاج Accept header كما فعلنا).';
-        }
-        showError('حدث خطأ أثناء محاولة تحميل الملف.', details);
+    } catch (err) {
+        showError(err);
     }
 }
 
-/* --- بقية كود العرض (من كودك الأصلي) --- */
-
+/* --- دوال عرض المجلدات والملفات --- */
 function getTopLevelFolders() {
     const set = new Set();
     zipObj.forEach((relativePath, file) => {
         const parts = relativePath.split('/').filter(Boolean);
         if (parts.length === 0) return;
-        if (file.dir) {
-            set.add(parts.join('/'));
-        } else if (parts.length >= 2) {
-            set.add(parts[0]);
-        } else if (!file.dir && parts.length === 1) {
-            set.add('root');
-        }
+        if (file.dir) set.add(parts.join('/'));
+        else if (parts.length >= 2) set.add(parts[0]);
+        else if (!file.dir && parts.length === 1) set.add('root');
     });
     return Array.from(set);
 }
@@ -255,8 +157,8 @@ async function renderFolder(folderName) {
     viewer.appendChild(grid);
 }
 
-/* --- ابدأ التحميل --- */
-loadZipFromReleasesAsset();
+/* --- بدء تحميل ZIP --- */
+loadZip();
 </script>
 </body>
 </html>
