@@ -6,16 +6,17 @@
 <title>ZIP Image Viewer</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
-body { font-family: sans-serif; direction: rtl; padding: 20px; background:#f5f5f5; color:#111; transition: background 0.3s, color 0.3s; }
+body { font-family: sans-serif; direction: rtl; padding: 20px; background:#f5f5f5; transition: background 0.3s,color 0.3s; color:#111; }
 body.dark { background:#121212; color:#ddd; }
-.folder { cursor: pointer; padding: 12px; border: 1px solid #ccc; border-radius: 10px; background:#f7f7f7; margin:6px 0; transition: background 0.3s, color 0.3s; }
+.folder-container { display:flex; align-items:center; gap:10px; margin:6px 0; }
+.folder { cursor:pointer; padding:12px; border:1px solid #ccc; border-radius:10px; background:#f7f7f7; flex:1; transition:background 0.3s,color 0.3s; }
 body.dark .folder { background:#1e1e1e; color:#ddd; border-color:#333; }
 .grid { display:grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap:15px; margin-top:20px; }
 img { width:100%; border-radius:10px; }
 button { padding:10px 20px; margin:10px 0; cursor:pointer; border-radius:6px; border:none; background:#4caf50; color:white; font-weight:bold; }
 button:hover { background:#45a049; }
-.progress-container { margin-top: 20px; width:100%; background:#eee; border-radius:5px; overflow:hidden; }
-.progress-bar { width:0%; height:20px; background:#4caf50; border-radius:5px; text-align:center; color:white; line-height:20px; white-space:nowrap; transition: width 0.2s; }
+.progress-container { margin-top:20px; width:100%; background:#eee; border-radius:5px; overflow:hidden; }
+.progress-bar { width:0%; height:20px; background:#4caf50; border-radius:5px; text-align:center; color:white; line-height:20px; white-space:nowrap; transition:width 0.2s; }
 .msg { margin-top:12px; color:#b00; }
 pre { background:#f4f4f4; padding:10px; border-radius:6px; overflow:auto; }
 body.dark pre { background:#1e1e1e; color:#ddd; }
@@ -36,6 +37,7 @@ function openDB() {
         req.onupgradeneeded = e=>{
             const db = e.target.result;
             if(!db.objectStoreNames.contains('zips')) db.createObjectStore('zips');
+            if(!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
         };
         req.onsuccess = e=>resolve(e.target.result);
         req.onerror = e=>reject(e);
@@ -53,12 +55,34 @@ async function getZip(key){
     });
 }
 
-async function saveZip(key, data){
+async function saveZip(key,arrayBuffer){
     const db = await openDB();
     return new Promise((resolve,reject)=>{
         const tx = db.transaction('zips','readwrite');
         const store = tx.objectStore('zips');
-        const req = store.put(data,key);
+        const req = store.put(arrayBuffer,key);
+        req.onsuccess = ()=>resolve();
+        req.onerror = e=>reject(e);
+    });
+}
+
+async function getMeta(key){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+        const tx = db.transaction('meta','readonly');
+        const store = tx.objectStore('meta');
+        const req = store.get(key);
+        req.onsuccess = ()=>resolve(req.result);
+        req.onerror = e=>reject(e);
+    });
+}
+
+async function saveMeta(key,value){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+        const tx = db.transaction('meta','readwrite');
+        const store = tx.objectStore('meta');
+        const req = store.put(value,key);
         req.onsuccess = ()=>resolve();
         req.onerror = e=>reject(e);
     });
@@ -81,42 +105,41 @@ function concatChunks(chunks,totalLength){
     return result;
 }
 
-/* --- تحميل ZIP مع مقارنة الحجم --- */
+/* --- تحميل ZIP مع progress وتقارن الحجم --- */
 async function loadZip(){
     try{
         const url='https://pub-64ea7c0b4e8d44fb86d9a76223463ea2.r2.dev/p.zip';
+        const response = await fetch(url);
+        if(!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
 
-        // جلب حجم الملف الحالي من السيرفر
-        const headResp = await fetch(url, { method:'HEAD' });
-        if(!headResp.ok) throw new Error(`HTTP ${headResp.status} ${headResp.statusText} عند HEAD`);
-        const serverSize = parseInt(headResp.headers.get('Content-Length')||'0',10);
-
-        let stored = await getZip('p.zip');
-        if(stored && stored.size === serverSize){
-            zipObj = await JSZip.loadAsync(stored.buffer);
-            document.getElementById('progressBar').style.display='none';
-            renderRoot();
-            console.log('تم استخدام النسخة المخزنة في IndexedDB');
-            return;
-        }
-
-        // تحميل الملف
-        const resp = await fetch(url);
-        if(!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText} عند GET`);
-        const contentType = resp.headers.get('Content-Type')||'';
+        const contentType = response.headers.get('Content-Type')||'';
         if(contentType.includes('text/html')){
-            const text = await resp.text().catch(()=>'(لا يمكن قراءة المحتوى)');
-            throw new Error(`المحتوى المرسل ليس ZIP\n\n${text.slice(0,2000)}`);
+            const text = await response.text().catch(()=>'(لا يمكن قراءة المحتوى)');
+            throw new Error(`المحتوى المرسل ليس ZIP (Content-Type: ${contentType})\n\nأول 2000 حرف:\n${text.slice(0,2000)}`);
         }
 
-        const totalLength = serverSize || null;
-        const reader = resp.body.getReader();
+        const totalLength = parseInt(response.headers.get('Content-Length')||'0',10)||null;
+        const savedMeta = await getMeta('p.zip');
+        if(savedMeta && totalLength && savedMeta.size === totalLength){
+            // نفس الحجم → استخدم النسخة القديمة
+            const buffer = await getZip('p.zip');
+            if(buffer){
+                zipObj = await JSZip.loadAsync(buffer);
+                document.getElementById('progressBar').style.display='none';
+                renderRoot();
+                console.log('تم تحميل ZIP من IndexedDB (نفس الحجم)');
+                return;
+            }
+        }
+
+        // إذا الحجم مختلف أو لم يكن موجود → نزيل الملف الجديد
+        const reader = response.body.getReader();
         const chunks=[];
         let received=0;
-        const pb = document.getElementById('progressBar');
+        const pb=document.getElementById('progressBar');
 
         while(true){
-            const {done,value}=await reader.read();
+            const {done,value} = await reader.read();
             if(done) break;
             chunks.push(value);
             received+=value.length;
@@ -124,7 +147,7 @@ async function loadZip(){
                 const percent=Math.round((received/totalLength)*100);
                 pb.style.width=percent+'%';
                 pb.textContent=percent+'%';
-            } else {
+            }else{
                 const approx=Math.min(99,Math.round((Math.log(received+1)/Math.log(1024*1024))*10)*10);
                 pb.style.width=approx+'%';
                 pb.textContent=approx+'%';
@@ -132,18 +155,17 @@ async function loadZip(){
         }
 
         const buffer = concatChunks(chunks,received);
-        await saveZip('p.zip',{ buffer, size: serverSize });
+        await saveZip('p.zip',buffer);
+        await saveMeta('p.zip',{size:received});
         zipObj = await JSZip.loadAsync(buffer);
-        pb.style.width='100%';
-        pb.textContent='100%';
-        setTimeout(()=>pb.style.display='none',500);
+        document.getElementById('progressBar').style.display='none';
         renderRoot();
-        console.log('تم تحميل النسخة الجديدة من R2 وحفظها في IndexedDB');
+        console.log('تم تحميل ZIP من R2 وحفظه في IndexedDB (جديد أو تحديث)');
 
-    }catch(err){ showError(err); }
+    }catch(err){showError(err);}
 }
 
-/* --- دوال عرض المجلدات والملفات --- */
+/* --- معاينة الصور لكل مجلد --- */
 function getTopLevelFolders(){
     const set=new Set();
     zipObj.forEach((path,file)=>{
@@ -165,9 +187,14 @@ function renderRoot(){
     folders.forEach(name=>{
         const displayName=name==='root'?'المجلد الرئيسي':name;
         const div=document.createElement('div');
-        div.className='folder';
-        div.textContent='📁 '+displayName;
-        div.onclick=()=>renderFolder(name);
+        div.className='folder-container';
+
+        const textDiv=document.createElement('div');
+        textDiv.className='folder';
+        textDiv.textContent='📁 '+displayName;
+        textDiv.onclick=()=>renderFolder(name);
+
+        div.appendChild(textDiv);
         viewer.appendChild(div);
     });
 }
@@ -207,6 +234,7 @@ async function renderFolder(folderName){
         }
     }
 
+    // زر الرجوع أسفل الصور
     const backBottom=document.createElement('button');
     backBottom.textContent='رجوع';
     backBottom.onclick=()=>renderRoot();
