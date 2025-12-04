@@ -6,105 +6,148 @@
 <title>ZIP Image Viewer</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <style>
- body { font-family: sans-serif; direction: rtl; padding: 20px; }
- .folder { cursor: pointer; padding: 12px; border: 1px solid #ccc; margin: 6px; border-radius: 10px; background:#f7f7f7; }
- .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 15px; margin-top:20px; }
- img { width: 100%; border-radius: 10px; }
- button { padding:10px 20px; margin-bottom:20px; }
- .msg { margin-top:12px; color:#b00; }
- .info { margin-top:12px; color:#1a73e8; }
- .progress-container { margin-top: 20px; width: 100%; background-color: #eee; border-radius: 5px; overflow: hidden; }
- .progress-bar { width: 0%; height: 20px; background-color: #4caf50; border-radius: 5px; text-align: center; color: white; line-height: 20px; white-space: nowrap; }
- pre { background:#f4f4f4; padding:10px; border-radius:6px; overflow:auto; }
+body { font-family: sans-serif; direction: rtl; padding: 20px; background:#f5f5f5; color:#111; transition: background 0.3s, color 0.3s; }
+body.dark { background:#121212; color:#ddd; }
+.folder { cursor: pointer; padding: 12px; border: 1px solid #ccc; border-radius: 10px; background:#f7f7f7; margin:6px 0; transition: background 0.3s, color 0.3s; }
+body.dark .folder { background:#1e1e1e; color:#ddd; border-color:#333; }
+.grid { display:grid; grid-template-columns: repeat(auto-fill,minmax(220px,1fr)); gap:15px; margin-top:20px; }
+img { width:100%; border-radius:10px; }
+button { padding:10px 20px; margin:10px 0; cursor:pointer; border-radius:6px; border:none; background:#4caf50; color:white; font-weight:bold; }
+button:hover { background:#45a049; }
+.progress-container { margin-top: 20px; width:100%; background:#eee; border-radius:5px; overflow:hidden; }
+.progress-bar { width:0%; height:20px; background:#4caf50; border-radius:5px; text-align:center; color:white; line-height:20px; white-space:nowrap; transition: width 0.2s; }
+.msg { margin-top:12px; color:#b00; }
+pre { background:#f4f4f4; padding:10px; border-radius:6px; overflow:auto; }
+body.dark pre { background:#1e1e1e; color:#ddd; }
 </style>
 </head>
 <body>
 <h2>جميع العطور</h2>
-
 <div class="progress-container"><div class="progress-bar" id="progressBar">0%</div></div>
 <div id="viewer"></div>
 
 <script>
 let zipObj;
 
-/* --- عرض الخطأ الحقيقي --- */
-function showError(err) {
-    const viewer = document.getElementById('viewer');
-    viewer.innerHTML = `<p class="msg">حدث خطأ أثناء تحميل أو قراءة الملف:</p><pre>${err}</pre>`;
+/* --- IndexedDB --- */
+function openDB() {
+    return new Promise((resolve,reject)=>{
+        const req = indexedDB.open('zipDB',1);
+        req.onupgradeneeded = e=>{
+            const db = e.target.result;
+            if(!db.objectStoreNames.contains('zips')) db.createObjectStore('zips');
+        };
+        req.onsuccess = e=>resolve(e.target.result);
+        req.onerror = e=>reject(e);
+    });
+}
+
+async function getZip(key){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+        const tx = db.transaction('zips','readonly');
+        const store = tx.objectStore('zips');
+        const req = store.get(key);
+        req.onsuccess = ()=>resolve(req.result);
+        req.onerror = e=>reject(e);
+    });
+}
+
+async function saveZip(key, data){
+    const db = await openDB();
+    return new Promise((resolve,reject)=>{
+        const tx = db.transaction('zips','readwrite');
+        const store = tx.objectStore('zips');
+        const req = store.put(data,key);
+        req.onsuccess = ()=>resolve();
+        req.onerror = e=>reject(e);
+    });
+}
+
+/* --- عرض الخطأ --- */
+function showError(err){
+    const viewer=document.getElementById('viewer');
+    viewer.innerHTML=`<p class="msg">حدث خطأ أثناء تحميل أو قراءة الملف:</p><pre>${err}</pre>`;
     console.error(err);
-    const pb = document.getElementById('progressBar');
-    if(pb){ pb.style.width='0%'; pb.textContent='خطأ'; }
+    const pb=document.getElementById('progressBar');
+    if(pb){pb.style.width='0%'; pb.textContent='خطأ';}
 }
 
 /* --- تحويل chunks إلى Uint8Array --- */
-function concatChunks(chunks, totalLength) {
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for(const c of chunks){
-        result.set(c, offset);
-        offset += c.length;
-    }
+function concatChunks(chunks,totalLength){
+    const result=new Uint8Array(totalLength);
+    let offset=0;
+    for(const c of chunks){ result.set(c,offset); offset+=c.length; }
     return result;
 }
 
-/* --- تحميل ZIP من Cloudflare R2 مع شريط تقدّم حقيقي --- */
-async function loadZip() {
-    const url = "https://pub-64ea7c0b4e8d44fb86d9a76223463ea2.r2.dev/p.zip";
+/* --- تحميل ZIP مع مقارنة الحجم --- */
+async function loadZip(){
+    try{
+        const url='https://pub-64ea7c0b4e8d44fb86d9a76223463ea2.r2.dev/p.zip';
 
-    try {
-        const response = await fetch(url);
-        if(!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        // جلب حجم الملف الحالي من السيرفر
+        const headResp = await fetch(url, { method:'HEAD' });
+        if(!headResp.ok) throw new Error(`HTTP ${headResp.status} ${headResp.statusText} عند HEAD`);
+        const serverSize = parseInt(headResp.headers.get('Content-Length')||'0',10);
 
-        const contentType = response.headers.get('Content-Type') || '';
-        if(contentType.includes('text/html')){
-            const text = await response.text().catch(()=>'(لا يمكن قراءة المحتوى)');
-            throw new Error(`المحتوى المرسل ليس ZIP (Content-Type: ${contentType})\n\nأول 2000 حرف:\n${text.slice(0,2000)}`);
+        let stored = await getZip('p.zip');
+        if(stored && stored.size === serverSize){
+            zipObj = await JSZip.loadAsync(stored.buffer);
+            document.getElementById('progressBar').style.display='none';
+            renderRoot();
+            console.log('تم استخدام النسخة المخزنة في IndexedDB');
+            return;
         }
 
-        const contentLengthHeader = response.headers.get('Content-Length');
-        const totalLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+        // تحميل الملف
+        const resp = await fetch(url);
+        if(!resp.ok) throw new Error(`HTTP ${resp.status} ${resp.statusText} عند GET`);
+        const contentType = resp.headers.get('Content-Type')||'';
+        if(contentType.includes('text/html')){
+            const text = await resp.text().catch(()=>'(لا يمكن قراءة المحتوى)');
+            throw new Error(`المحتوى المرسل ليس ZIP\n\n${text.slice(0,2000)}`);
+        }
 
-        const reader = response.body.getReader();
-        const chunks = [];
-        let received = 0;
+        const totalLength = serverSize || null;
+        const reader = resp.body.getReader();
+        const chunks=[];
+        let received=0;
+        const pb = document.getElementById('progressBar');
 
         while(true){
-            const {done, value} = await reader.read();
+            const {done,value}=await reader.read();
             if(done) break;
             chunks.push(value);
-            received += value.length;
-
+            received+=value.length;
             if(totalLength){
-                const percent = Math.round((received/totalLength)*100);
-                const pb = document.getElementById('progressBar');
-                pb.style.width = percent + '%';
-                pb.textContent = percent + '%';
+                const percent=Math.round((received/totalLength)*100);
+                pb.style.width=percent+'%';
+                pb.textContent=percent+'%';
+            } else {
+                const approx=Math.min(99,Math.round((Math.log(received+1)/Math.log(1024*1024))*10)*10);
+                pb.style.width=approx+'%';
+                pb.textContent=approx+'%';
             }
         }
 
-        const all = concatChunks(chunks, received);
-
-        try {
-            zipObj = await JSZip.loadAsync(all);
-        } catch(err){
-            const head = all.slice(0,64);
-            const hex = Array.from(head).map(b=>b.toString(16).padStart(2,'0')).join(' ');
-            throw new Error(`فشل JSZip في قراءة الملف: ${err}\n\nأول 64 بايت (hex):\n${hex}`);
-        }
-
-        document.getElementById('progressBar').style.display='none';
+        const buffer = concatChunks(chunks,received);
+        await saveZip('p.zip',{ buffer, size: serverSize });
+        zipObj = await JSZip.loadAsync(buffer);
+        pb.style.width='100%';
+        pb.textContent='100%';
+        setTimeout(()=>pb.style.display='none',500);
         renderRoot();
+        console.log('تم تحميل النسخة الجديدة من R2 وحفظها في IndexedDB');
 
-    } catch(err){
-        showError(err);
-    }
+    }catch(err){ showError(err); }
 }
 
-/* --- عرض المجلدات --- */
-function getTopLevelFolders() {
-    const set = new Set();
-    zipObj.forEach((relativePath, file) => {
-        const parts = relativePath.split('/').filter(Boolean);
+/* --- دوال عرض المجلدات والملفات --- */
+function getTopLevelFolders(){
+    const set=new Set();
+    zipObj.forEach((path,file)=>{
+        const parts=path.split('/').filter(Boolean);
         if(parts.length===0) return;
         if(file.dir) set.add(parts.join('/'));
         else if(parts.length>=2) set.add(parts[0]);
@@ -113,68 +156,70 @@ function getTopLevelFolders() {
     return Array.from(set);
 }
 
-function renderRoot() {
-    const viewer = document.getElementById("viewer");
-    viewer.innerHTML = "";
+function renderRoot(){
+    const viewer=document.getElementById('viewer');
+    viewer.innerHTML='';
+    const folders=getTopLevelFolders();
+    if(folders.length===0){ viewer.innerHTML='<p class="msg">لا توجد ملفات أو مجلدات داخل ZIP</p>'; return; }
 
-    const folders = getTopLevelFolders();
-    if(folders.length===0){
-        viewer.innerHTML = '<p class="msg">لا توجد ملفات أو مجلدات داخل ZIP</p>';
-        return;
-    }
-
-    folders.forEach(folderName=>{
-        const name = folderName==='root' ? 'المجلد الرئيسي' : folderName;
-        const div = document.createElement("div");
-        div.className="folder";
-        div.textContent="📁 "+name;
-        div.onclick=()=>renderFolder(folderName);
+    folders.forEach(name=>{
+        const displayName=name==='root'?'المجلد الرئيسي':name;
+        const div=document.createElement('div');
+        div.className='folder';
+        div.textContent='📁 '+displayName;
+        div.onclick=()=>renderFolder(name);
         viewer.appendChild(div);
     });
 }
 
-/* --- عرض محتوى المجلد --- */
 async function renderFolder(folderName){
-    const viewer=document.getElementById("viewer");
-    viewer.innerHTML="";
+    const viewer=document.getElementById('viewer');
+    viewer.innerHTML='';
 
-    const back=document.createElement("button");
-    back.textContent="رجوع";
-    back.onclick=()=>renderRoot();
-    viewer.appendChild(back);
+    const backTop=document.createElement('button');
+    backTop.textContent='رجوع';
+    backTop.onclick=()=>renderRoot();
+    viewer.appendChild(backTop);
 
-    const grid=document.createElement("div");
-    grid.className="grid";
-
+    const grid=document.createElement('div');
+    grid.className='grid';
     const files=[];
-    zipObj.forEach((relativePath,file)=>{
-        const path = relativePath.replace(/\/$/,'');
+    zipObj.forEach((path,file)=>{
+        const p=path.replace(/\/$/,'');
         if(file.dir) return;
         if(folderName==='root'){
-            if(!path.includes('/')) files.push(file);
-        } else {
-            if(path.startsWith(folderName+'/')) files.push(file);
-            else if(path.split('/')[0]===folderName && !path.includes('/')) files.push(file);
+            if(!p.includes('/')) files.push(file);
+        }else{
+            if(p.startsWith(folderName+'/')) files.push(file);
+            else if(p.split('/')[0]===folderName && !p.includes('/')) files.push(file);
         }
     });
 
-    if(files.length===0){
-        viewer.innerHTML+='<p class="msg">لا توجد صور في هذا المجلد</p>';
-        return;
-    }
+    if(files.length===0){ viewer.innerHTML+='<p class="msg">لا توجد صور في هذا المجلد</p>'; return; }
 
     for(const file of files){
         if(/\.(jpg|jpeg|png|gif|webp)$/i.test(file.name)){
-            const blob = await file.async("blob");
-            const url = URL.createObjectURL(blob);
-            const img = document.createElement("img");
-            img.src = url;
+            const blob=await file.async('blob');
+            const url=URL.createObjectURL(blob);
+            const img=document.createElement('img');
+            img.src=url;
             grid.appendChild(img);
         }
     }
 
+    const backBottom=document.createElement('button');
+    backBottom.textContent='رجوع';
+    backBottom.onclick=()=>renderRoot();
+    grid.appendChild(backBottom);
+
     viewer.appendChild(grid);
 }
+
+/* --- Dark Mode Toggle --- */
+const darkBtn=document.createElement('button');
+darkBtn.textContent='تفعيل / تعطيل الوضع الداكن';
+darkBtn.onclick=()=>document.body.classList.toggle('dark');
+document.body.insertBefore(darkBtn,document.getElementById('viewer'));
 
 /* --- بدء التحميل --- */
 loadZip();
