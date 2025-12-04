@@ -27,49 +27,67 @@
 <script>
 let zipObj;
 
-/* --- دالة عرض الخطأ الحقيقي --- */
+/* --- عرض الخطأ الحقيقي --- */
 function showError(err) {
     const viewer = document.getElementById('viewer');
     viewer.innerHTML = `<p class="msg">حدث خطأ أثناء تحميل أو قراءة الملف:</p><pre>${err}</pre>`;
     console.error(err);
     const pb = document.getElementById('progressBar');
-    if(pb) { pb.style.width='0%'; pb.textContent='خطأ'; }
+    if(pb){ pb.style.width='0%'; pb.textContent='خطأ'; }
 }
 
-/* --- دالة لتحويل chunks إلى Uint8Array --- */
+/* --- تحويل chunks إلى Uint8Array --- */
 function concatChunks(chunks, totalLength) {
     const result = new Uint8Array(totalLength);
     let offset = 0;
-    for (const c of chunks) {
+    for(const c of chunks){
         result.set(c, offset);
         offset += c.length;
     }
     return result;
 }
 
-/* --- دالة تحميل ZIP من رابط خارجي --- */
+/* --- تحميل ZIP من Cloudflare R2 مع شريط تقدّم حقيقي --- */
 async function loadZip() {
     const url = "https://pub-64ea7c0b4e8d44fb86d9a76223463ea2.r2.dev/p.zip";
 
     try {
         const response = await fetch(url);
-        if (!response.ok) {
-            const text = await response.text().catch(()=>'');
-            throw new Error(`HTTP ${response.status} ${response.statusText}\n\nResponse body:\n${text.slice(0,1000)}`);
-        }
+        if(!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
 
         const contentType = response.headers.get('Content-Type') || '';
-        if (contentType.includes('text/html')) {
+        if(contentType.includes('text/html')){
             const text = await response.text().catch(()=>'(لا يمكن قراءة المحتوى)');
             throw new Error(`المحتوى المرسل ليس ZIP (Content-Type: ${contentType})\n\nأول 2000 حرف:\n${text.slice(0,2000)}`);
         }
 
-        const arrayBuffer = await response.arrayBuffer();
+        const contentLengthHeader = response.headers.get('Content-Length');
+        const totalLength = contentLengthHeader ? parseInt(contentLengthHeader, 10) : null;
+
+        const reader = response.body.getReader();
+        const chunks = [];
+        let received = 0;
+
+        while(true){
+            const {done, value} = await reader.read();
+            if(done) break;
+            chunks.push(value);
+            received += value.length;
+
+            if(totalLength){
+                const percent = Math.round((received/totalLength)*100);
+                const pb = document.getElementById('progressBar');
+                pb.style.width = percent + '%';
+                pb.textContent = percent + '%';
+            }
+        }
+
+        const all = concatChunks(chunks, received);
 
         try {
-            zipObj = await JSZip.loadAsync(arrayBuffer);
-        } catch (err) {
-            const head = new Uint8Array(arrayBuffer.slice(0,64));
+            zipObj = await JSZip.loadAsync(all);
+        } catch(err){
+            const head = all.slice(0,64);
             const hex = Array.from(head).map(b=>b.toString(16).padStart(2,'0')).join(' ');
             throw new Error(`فشل JSZip في قراءة الملف: ${err}\n\nأول 64 بايت (hex):\n${hex}`);
         }
@@ -77,20 +95,20 @@ async function loadZip() {
         document.getElementById('progressBar').style.display='none';
         renderRoot();
 
-    } catch (err) {
+    } catch(err){
         showError(err);
     }
 }
 
-/* --- دوال عرض المجلدات والملفات --- */
+/* --- عرض المجلدات --- */
 function getTopLevelFolders() {
     const set = new Set();
     zipObj.forEach((relativePath, file) => {
         const parts = relativePath.split('/').filter(Boolean);
-        if (parts.length === 0) return;
-        if (file.dir) set.add(parts.join('/'));
-        else if (parts.length >= 2) set.add(parts[0]);
-        else if (!file.dir && parts.length === 1) set.add('root');
+        if(parts.length===0) return;
+        if(file.dir) set.add(parts.join('/'));
+        else if(parts.length>=2) set.add(parts[0]);
+        else if(!file.dir && parts.length===1) set.add('root');
     });
     return Array.from(set);
 }
@@ -100,52 +118,53 @@ function renderRoot() {
     viewer.innerHTML = "";
 
     const folders = getTopLevelFolders();
-    if (folders.length === 0) {
+    if(folders.length===0){
         viewer.innerHTML = '<p class="msg">لا توجد ملفات أو مجلدات داخل ZIP</p>';
         return;
     }
 
-    folders.forEach(folderName => {
-        const name = folderName === 'root' ? 'المجلد الرئيسي' : folderName;
+    folders.forEach(folderName=>{
+        const name = folderName==='root' ? 'المجلد الرئيسي' : folderName;
         const div = document.createElement("div");
-        div.className = "folder";
-        div.textContent = "📁 " + name;
-        div.onclick = () => renderFolder(folderName);
+        div.className="folder";
+        div.textContent="📁 "+name;
+        div.onclick=()=>renderFolder(folderName);
         viewer.appendChild(div);
     });
 }
 
-async function renderFolder(folderName) {
-    const viewer = document.getElementById("viewer");
-    viewer.innerHTML = "";
+/* --- عرض محتوى المجلد --- */
+async function renderFolder(folderName){
+    const viewer=document.getElementById("viewer");
+    viewer.innerHTML="";
 
-    const back = document.createElement("button");
-    back.textContent = "رجوع";
-    back.onclick = () => renderRoot();
+    const back=document.createElement("button");
+    back.textContent="رجوع";
+    back.onclick=()=>renderRoot();
     viewer.appendChild(back);
 
-    const grid = document.createElement("div");
-    grid.className = "grid";
+    const grid=document.createElement("div");
+    grid.className="grid";
 
-    const files = [];
-    zipObj.forEach((relativePath, file) => {
-        const path = relativePath.replace(/\/$/, '');
-        if (file.dir) return;
-        if (folderName === 'root') {
-            if (!path.includes('/')) files.push(file);
+    const files=[];
+    zipObj.forEach((relativePath,file)=>{
+        const path = relativePath.replace(/\/$/,'');
+        if(file.dir) return;
+        if(folderName==='root'){
+            if(!path.includes('/')) files.push(file);
         } else {
-            if (path.startsWith(folderName + '/')) files.push(file);
-            else if (path.split('/')[0] === folderName && !path.includes('/')) files.push(file);
+            if(path.startsWith(folderName+'/')) files.push(file);
+            else if(path.split('/')[0]===folderName && !path.includes('/')) files.push(file);
         }
     });
 
-    if (files.length === 0) {
-        viewer.innerHTML += '<p class="msg">لا توجد صور في هذا المجلد</p>';
+    if(files.length===0){
+        viewer.innerHTML+='<p class="msg">لا توجد صور في هذا المجلد</p>';
         return;
     }
 
-    for (const file of files) {
-        if (/\.(jpg|jpeg|png|gif|webp)$/i.test(file.name)) {
+    for(const file of files){
+        if(/\.(jpg|jpeg|png|gif|webp)$/i.test(file.name)){
             const blob = await file.async("blob");
             const url = URL.createObjectURL(blob);
             const img = document.createElement("img");
@@ -157,7 +176,7 @@ async function renderFolder(folderName) {
     viewer.appendChild(grid);
 }
 
-/* --- بدء تحميل ZIP --- */
+/* --- بدء التحميل --- */
 loadZip();
 </script>
 </body>
